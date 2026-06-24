@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Video WB Pro V2 (Kelvin + Tint + WB Picker) — Import/Export + Autoload
 // @namespace    amir.video.wbpro
-// @version      3.28
-// @description  Powerful WB for HTML5 video: extended Kelvin (500–100,000 K), Tint, Strength, WB picker, per-video Save/Restore, JSON Import/Export, autoload on reopen. Shadow-DOM UI; starts hidden; draggable bubble hides if no video; hardened for YouTube/SPAs.
+// @version      3.39
+// @description  Powerful WB for HTML5 video: extended Kelvin (500-100,000 K), Tint, Strength, Shadows, Midtones, Highlights, Dehaze, Compression Cleanup, WB picker, per-video Save/Restore, JSON Import/Export, autoload on reopen. Shadow-DOM UI; starts hidden; draggable bubble hides if no video; hardened for YouTube/SPAs.
 // @match        *://*/*
 // @grant        GM_addStyle
 // @grant        GM_getValue
@@ -44,6 +44,11 @@
       brightness: 100,
       contrast: 100,
       saturation: 100,
+      shadows: 0,
+      midtones: 0,
+      highlights: 0,
+      dehaze: 0,
+      compressionCleanup: 0,
       sharpness: 0,
       compareEnabled: false,
       comparePos: 50,
@@ -71,7 +76,7 @@
     panelLinkGap: 12,
     rescanTries: 50,
     rescanIntervalMs: 200,
-    exportSchema: 'video-wb-pro-snapshots-1'
+    exportSchema: 'video-wb-pro-snapshots-2'
   };
 
   // ---------- Safe storage ----------
@@ -109,6 +114,11 @@
     next.h = num(next.h, CONFIG.default.h);
     next.bubbleX = num(next.bubbleX, CONFIG.default.bubbleX);
     next.bubbleY = num(next.bubbleY, CONFIG.default.bubbleY);
+    next.shadows = clamp(Math.round(num(next.shadows, CONFIG.default.shadows)), -100, 100);
+    next.midtones = clamp(Math.round(num(next.midtones, CONFIG.default.midtones)), -100, 100);
+    next.highlights = clamp(Math.round(num(next.highlights, CONFIG.default.highlights)), -100, 100);
+    next.dehaze = clamp(Math.round(num(next.dehaze, CONFIG.default.dehaze)), 0, 100);
+    next.compressionCleanup = clamp(Math.round(num(next.compressionCleanup, CONFIG.default.compressionCleanup)), 0, 100);
     next.comparePos = clamp(num(next.comparePos, CONFIG.default.comparePos), 0, 100);
     return next;
   }
@@ -126,6 +136,11 @@
       brightness: clamp(Math.round(num(raw.brightness, CONFIG.default.brightness)), 10, 200),
       contrast: clamp(Math.round(num(raw.contrast, CONFIG.default.contrast)), 10, 250),
       saturation: clamp(Math.round(num(raw.saturation, CONFIG.default.saturation)), 0, 250),
+      shadows: clamp(Math.round(num(raw.shadows, CONFIG.default.shadows)), -100, 100),
+      midtones: clamp(Math.round(num(raw.midtones, CONFIG.default.midtones)), -100, 100),
+      highlights: clamp(Math.round(num(raw.highlights, CONFIG.default.highlights)), -100, 100),
+      dehaze: clamp(Math.round(num(raw.dehaze, CONFIG.default.dehaze)), 0, 100),
+      compressionCleanup: clamp(Math.round(num(raw.compressionCleanup, CONFIG.default.compressionCleanup)), 0, 100),
       sharpness: clamp(Math.round(num(raw.sharpness, CONFIG.default.sharpness)), -50, 150)
     };
   }
@@ -142,6 +157,11 @@
       s.brightness,
       s.contrast,
       s.saturation,
+      s.shadows,
+      s.midtones,
+      s.highlights,
+      s.dehaze,
+      s.compressionCleanup,
       s.sharpness
     ].join('|');
   }
@@ -158,7 +178,7 @@
     state.w = clamp(state.w || CONFIG.panelW, 260, Math.max(260, (innerWidth||1200) - 40));
     state.h = state.h ? clamp(state.h, 220, Math.max(220, (innerHeight||800) - 40)) : CONFIG.panelH;
   }
-  let host, sr, panel, bubble, observer, matrixNode, matrixNodeLite, sharpNode, svgHost;
+  let host, sr, panel, bubble, observer, matrixNode, matrixNodeLite, toneNode, toneNodeLite, sharpNode, svgHost;
   let els = {}; // panel refs
   let lastPrimaryVideo = null;
   let lastKeyToggleAt = 0;
@@ -167,6 +187,12 @@
   let lastEffectStamp = effectStamp(state);
   let lastFramePingAt = 0;
   let lastFrameHasVideo = null;
+  let bubbleDragging = false;
+  let lastBubbleAnchorKey = '';
+  let lastBubbleAnchorArea = 0;
+  let bubbleManualPageKey = '';
+  let bubbleDragShield = null;
+  let childVideoPageKey = '';
   let fullscreenActive = false;
   let lastHealAt = 0;
   const lastFilterApplyAt = new WeakMap();
@@ -272,7 +298,7 @@
   }
   const STABLE_HOSTS = ['fulltaboo.tv'];
   const NORMAL_FULLSCREEN_FILTER_HOSTS = ['animepahe.pw'];
-  const CHILD_VIDEO_ONLY_HOSTS = ['animepahe.pw'];
+  const CHILD_VIDEO_ONLY_HOSTS = ['animepahe.pw', 'fulltaboo.tv'];
   const IFRAME_TARGET_SELECTORS = [
     '.video-player iframe',
     '.responsive-player iframe',
@@ -300,8 +326,18 @@
       return false;
     }
   };
+  const referrerChildVideoOnlyHost = () => {
+    try {
+      if (!document.referrer) return false;
+      const host = new URL(document.referrer).hostname || '';
+      return isChildVideoOnlyHost(host);
+    } catch {
+      return false;
+    }
+  };
   const STABLE_MODE = isStableHost(location.hostname) || referrerStableHost();
-  const DELEGATE_TO_PARENT = !IS_TOP && referrerStableHost();
+  const DIRECT_CHILD_VIDEO_MODE = !IS_TOP && referrerChildVideoOnlyHost();
+  const DELEGATE_TO_PARENT = !IS_TOP && referrerStableHost() && !DIRECT_CHILD_VIDEO_MODE;
   const IFRAME_TARGET_MODE = IS_TOP && isStableHost(location.hostname);
   const NORMAL_FULLSCREEN_FILTER_MODE = isNormalFullscreenFilterHost(location.hostname) || referrerNormalFullscreenFilterHost();
 
@@ -353,13 +389,26 @@
     if (allowIframeTargets()) return listIframeTargets(false).length > 0;
     return false;
   }
+  function hasFreshFrameVideo() {
+    if (!IS_TOP) return false;
+    if (childVideoPageKey === location.href) return true;
+    const now = Date.now();
+    for (const [id, entry] of framePresence.entries()) {
+      if (!entry) continue;
+      if (now - entry.at > FRAME_STATUS_TTL_MS) { framePresence.delete(id); continue; }
+      if (entry.hasVideo) return true;
+    }
+    return false;
+  }
   function shouldApplyFilters(userAction) {
     if (DELEGATE_TO_PARENT) return false;
+    if (DIRECT_CHILD_VIDEO_MODE && document.querySelector('video')) return true;
     return !STABLE_MODE || !!userAction;
   }
 
   function shouldSkipIframeFilter() {
     return (IS_TOP && isChildVideoOnlyHost(location.hostname)) ||
+      (IS_TOP && hasFreshFrameVideo()) ||
       (IS_TOP && state.compareEnabled && allowIframeTargets());
   }
 
@@ -435,7 +484,9 @@
       const data = event.data;
       if (!data || data.source !== 'vwb' || data.type !== 'frame-status' || !data.id) return;
       framePresence.set(data.id, { hasVideo: !!data.hasVideo, at: Date.now() });
+      if (data.hasVideo) childVideoPageKey = location.href;
       updateBubbleVisibility();
+      if (data.hasVideo) applyToVideos(false, false);
     });
   }
 
@@ -475,6 +526,7 @@
     if (!prevEnabled) startObserver();
     if (!prevEnabled || nextEffect !== prevEffect || userAction) {
       refreshMatrix();
+      refreshToneCurve();
       refreshSharpness();
       applyToVideos(true, userAction);
     }
@@ -539,20 +591,51 @@
       .vwb-slider{ width:100% }
       .vwb-small{ font-size:12px; color:#666 }
       .vwb-btn{ padding:6px 10px; border-radius:8px; border:1px solid rgba(0,0,0,.15); background:#f7f7f7; cursor:pointer }
+      .vwb-curve{
+        width:100%; height:66px; display:block; box-sizing:border-box; margin:6px 0 4px;
+        border:1px solid rgba(0,0,0,.12); border-radius:10px; background:linear-gradient(180deg,#fff,#f7f8fa);
+      }
+      #vwb-tone-curve-grid{ stroke:rgba(0,0,0,.12); stroke-width:1; }
+      #vwb-tone-curve-line{ fill:none; stroke:#111; stroke-width:3; stroke-linecap:round; stroke-linejoin:round; }
+      #vwb-tone-curve-base{ fill:none; stroke:rgba(0,0,0,.22); stroke-width:1; stroke-dasharray:4 4; }
       #vwb-actions{ display:flex; gap:8px; margin-top:8px; flex-wrap:wrap }
+      #vwb-history-panel{ display:none; margin-top:8px; padding:8px; border:1px solid rgba(0,0,0,.12); border-radius:10px; background:#fff; max-height:240px; overflow:auto; }
+      #vwb-history-panel.open{ display:block; }
+      .vwb-history-head{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+      .vwb-history-title{ font-weight:700; }
+      #vwb-history-search{ box-sizing:border-box; width:100%; padding:6px 8px; margin:0 0 8px; border:1px solid rgba(0,0,0,.18); border-radius:8px; font:inherit; }
+      .vwb-history-list{ display:flex; flex-direction:column; gap:7px; }
+      .vwb-history-row{ padding:7px; border:1px solid rgba(0,0,0,.1); border-radius:8px; background:#fafafa; }
+      .vwb-history-meta{ font-weight:600; overflow-wrap:anywhere; }
+      .vwb-history-settings{ margin-top:3px; color:#444; font:11px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace; overflow-wrap:anywhere; }
+      .vwb-history-actions{ display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
       #vwb-toggles{ display:flex; gap:12px; align-items:center; margin-top:4px }
       #vwb-site-row{ margin:10px 0; padding:8px; border:1px solid rgba(0,0,0,.1); border-radius:10px; background:#fafafa; }
       #vwb-site-actions{ display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
       #vwb-site-input{ box-sizing:border-box; width:100%; padding:6px 8px; border:1px solid rgba(0,0,0,.18); border-radius:8px; font:inherit; }
       #vwb-bubble{
-        position:fixed; width:32px; height:32px; border-radius:50%;
+        position:fixed; width:82px; height:40px; border-radius:14px; box-sizing:border-box;
+        padding:4px 6px;
         background:#111; color:#fff; display:none; /* hidden until a video exists */
-        align-items:center; justify-content:center;
+        align-items:center; justify-content:center; flex-direction:column; gap:2px;
         font: 12px/1 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
         cursor:grab; z-index:${CONFIG.z}; box-shadow:0 4px 10px rgba(0,0,0,.25);
         user-select:none; left:0; top:0;
       }
+      #vwb-bubble-main{ display:block; font-weight:800; line-height:1; }
       #vwb-bubble.dragging { cursor:grabbing; }
+      #vwb-bubble-drag-shield{
+        position:fixed; inset:0; z-index:${CONFIG.z - 1};
+        cursor:grabbing; background:rgba(0,0,0,0); user-select:none;
+      }
+      #vwb-target-badge{
+        position:static; max-width:100%; box-sizing:border-box;
+        padding:2px 5px; border-radius:999px; border:1px solid rgba(255,255,255,.42);
+        background:rgba(255,255,255,.16); color:#fff;
+        font:700 8px/1 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+        letter-spacing:0; text-transform:lowercase; white-space:nowrap;
+        overflow:hidden; text-overflow:ellipsis; pointer-events:none;
+      }
       #vwb-actions .vwb-btn:disabled { opacity:.5; cursor:not-allowed; }
       input[type="file"].vwb-file { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
       #vwb-compare-status.warn { color: #b45309; }
@@ -618,6 +701,31 @@
       }
       return fe;
     };
+    const ensureTone = (filter) => {
+      let tone = filter.querySelector('feComponentTransfer[data-vwb-tone="1"]');
+      if (!tone) {
+        tone = document.createElementNS(ns,'feComponentTransfer');
+        tone.setAttribute('data-vwb-tone','1');
+        tone.setAttribute('in','wb');
+        tone.setAttribute('result','tone');
+        for (const tag of ['feFuncR', 'feFuncG', 'feFuncB']) {
+          const fn = document.createElementNS(ns, tag);
+          fn.setAttribute('type','table');
+          fn.setAttribute('tableValues','0 1');
+          tone.appendChild(fn);
+        }
+        filter.appendChild(tone);
+      }
+      for (const tag of ['feFuncR', 'feFuncG', 'feFuncB']) {
+        if (!tone.querySelector(tag)) {
+          const fn = document.createElementNS(ns, tag);
+          fn.setAttribute('type','table');
+          fn.setAttribute('tableValues','0 1');
+          tone.appendChild(fn);
+        }
+      }
+      return tone;
+    };
     const ensureSharp = (filter) => {
       let sharp = filter.querySelector('feConvolveMatrix');
       if (!sharp) {
@@ -625,19 +733,27 @@
         sharp.setAttribute('order','3');
         sharp.setAttribute('kernelMatrix','0 0 0 0 1 0 0 0 0');
         sharp.setAttribute('preserveAlpha','true');
-        sharp.setAttribute('in','wb');
+        sharp.setAttribute('in','tone');
         sharp.setAttribute('result','sharp');
         filter.appendChild(sharp);
       }
+      sharp.setAttribute('in','tone');
       return sharp;
     };
 
     const mainFilter = ensureFilter('vwb-filter');
     matrixNode = ensureMatrix(mainFilter);
+    toneNode = ensureTone(mainFilter);
     sharpNode = ensureSharp(mainFilter);
+    mainFilter.appendChild(matrixNode);
+    mainFilter.appendChild(toneNode);
+    mainFilter.appendChild(sharpNode);
 
     const liteFilter = ensureFilter('vwb-filter-lite');
     matrixNodeLite = ensureMatrix(liteFilter);
+    toneNodeLite = ensureTone(liteFilter);
+    liteFilter.appendChild(matrixNodeLite);
+    liteFilter.appendChild(toneNodeLite);
   }
 
   // ---------- Build UI (in Shadow) ----------
@@ -647,7 +763,7 @@
     if (sr.getElementById('vwb-bubble')) { bubble = sr.getElementById('vwb-bubble'); return bubble; }
     bubble = document.createElement('div');
     bubble.id = 'vwb-bubble';
-    bubble.textContent = 'WB';
+    setTrustedHTML(bubble, '<span id="vwb-bubble-main">WB</span><span id="vwb-target-badge">direct video</span>');
     bubble.title = 'Show/Hide Video WB Panel (Alt+W)';
     bubble.style.left = `${state.bubbleX}px`;
     bubble.style.top  = `${state.bubbleY}px`;
@@ -692,6 +808,8 @@
         <div class="vwb-flex">
           <input id="vwb-tint" class="vwb-slider" type="range" min="-100" max="100" step="1" value="${state.tint}">
           <input id="vwb-tint-num" class="vwb-num" type="number" min="-100" max="100" step="1" value="${state.tint}">
+          <button id="vwb-tminus" class="vwb-btn" style="padding:4px 6px; min-width:42px;">-1</button>
+          <button id="vwb-tplus" class="vwb-btn" style="padding:4px 6px; min-width:42px;">+1</button>
         </div>
         <div class="vwb-small">− = greener, + = magenta.</div>
       </div>
@@ -726,6 +844,51 @@
           <input id="vwb-sat" class="vwb-slider" type="range" min="0" max="250" step="1" value="${state.saturation}">
           <input id="vwb-sat-num" class="vwb-num" type="number" min="0" max="250" step="1" value="${state.saturation}">
         </div>
+      </div>
+
+      <div class="vwb-row">
+        <div class="vwb-label"><span>Tone curve</span><span id="vwb-tone-read">S ${state.shadows} / M ${state.midtones} / H ${state.highlights}</span></div>
+        <svg id="vwb-tone-curve" class="vwb-curve" viewBox="0 0 128 64" aria-label="Tone curve preview" role="img">
+          <g id="vwb-tone-curve-grid">
+            <path d="M0 16H128M0 32H128M0 48H128M32 0V64M64 0V64M96 0V64"></path>
+          </g>
+          <path id="vwb-tone-curve-base" d="M0 64L128 0"></path>
+          <polyline id="vwb-tone-curve-line" points=""></polyline>
+        </svg>
+        <div class="vwb-flex">
+          <span class="vwb-small" style="width:72px;">Shadows</span>
+          <input id="vwb-shadows" class="vwb-slider" type="range" min="-100" max="100" step="1" value="${state.shadows}">
+          <input id="vwb-shadows-num" class="vwb-num" type="number" min="-100" max="100" step="1" value="${state.shadows}">
+        </div>
+        <div class="vwb-flex">
+          <span class="vwb-small" style="width:72px;">Midtones</span>
+          <input id="vwb-midtones" class="vwb-slider" type="range" min="-100" max="100" step="1" value="${state.midtones}">
+          <input id="vwb-midtones-num" class="vwb-num" type="number" min="-100" max="100" step="1" value="${state.midtones}">
+        </div>
+        <div class="vwb-flex">
+          <span class="vwb-small" style="width:72px;">Highlights</span>
+          <input id="vwb-highlights" class="vwb-slider" type="range" min="-100" max="100" step="1" value="${state.highlights}">
+          <input id="vwb-highlights-num" class="vwb-num" type="number" min="-100" max="100" step="1" value="${state.highlights}">
+        </div>
+        <div class="vwb-small">Negative pulls that tonal range down. Positive lifts it. Curve preview shows the final luminance remap.</div>
+      </div>
+
+      <div class="vwb-row">
+        <div class="vwb-label"><span>Dehaze</span><span id="vwb-dehazeread">${state.dehaze}%</span></div>
+        <div class="vwb-flex">
+          <input id="vwb-dehaze" class="vwb-slider" type="range" min="0" max="100" step="1" value="${state.dehaze}">
+          <input id="vwb-dehaze-num" class="vwb-num" type="number" min="0" max="100" step="1" value="${state.dehaze}">
+        </div>
+        <div class="vwb-small">Adds cheap clarity by lifting local-looking contrast and colour separation.</div>
+      </div>
+
+      <div class="vwb-row">
+        <div class="vwb-label"><span>Compression cleanup</span><span id="vwb-cleanread">${state.compressionCleanup}%</span></div>
+        <div class="vwb-flex">
+          <input id="vwb-clean" class="vwb-slider" type="range" min="0" max="100" step="1" value="${state.compressionCleanup}">
+          <input id="vwb-clean-num" class="vwb-num" type="number" min="0" max="100" step="1" value="${state.compressionCleanup}">
+        </div>
+        <div class="vwb-small">Softens blocky low-bitrate streams with a capped blur so detail does not turn mushy.</div>
       </div>
 
       <div class="vwb-row">
@@ -776,10 +939,13 @@
         <button id="vwb-export" class="vwb-btn" title="Export ALL video presets to JSON">Export</button>
         <button id="vwb-import" class="vwb-btn" title="Import presets JSON (merge)">Import</button>
         <input id="vwb-import-file" class="vwb-file" type="file" accept="application/json">
+        <button id="vwb-history" class="vwb-btn" title="Show saved video and website settings">History</button>
         <button id="vwb-center" class="vwb-btn" title="Move panel to the middle">Center</button>
         <button id="vwb-reset" class="vwb-btn">Reset</button>
         <button id="vwb-rescan" class="vwb-btn">Rescan</button>
       </div>
+
+      <div id="vwb-history-panel" aria-live="polite"></div>
 
       <div class="vwb-small">Settings auto-save per video for 60 days. Compare split shows filtered vs original. Save -> Reset -> Restore also works. Import/Export moves presets across machines.</div>
       <div class="vwb-small" id="vwb-save-status">No video save yet. Changes auto-save for 60 days.</div>
@@ -804,6 +970,18 @@
       cInput:  panel.querySelector('#vwb-contrast-num'),
       satSlider: panel.querySelector('#vwb-sat'),
       satInput:  panel.querySelector('#vwb-sat-num'),
+      shadowsSlider: panel.querySelector('#vwb-shadows'),
+      shadowsInput:  panel.querySelector('#vwb-shadows-num'),
+      midtonesSlider: panel.querySelector('#vwb-midtones'),
+      midtonesInput:  panel.querySelector('#vwb-midtones-num'),
+      highlightsSlider: panel.querySelector('#vwb-highlights'),
+      highlightsInput:  panel.querySelector('#vwb-highlights-num'),
+      toneRead: panel.querySelector('#vwb-tone-read'),
+      toneCurveLine: panel.querySelector('#vwb-tone-curve-line'),
+      dehazeSlider: panel.querySelector('#vwb-dehaze'),
+      dehazeInput:  panel.querySelector('#vwb-dehaze-num'),
+      cleanSlider: panel.querySelector('#vwb-clean'),
+      cleanInput:  panel.querySelector('#vwb-clean-num'),
       shSlider: panel.querySelector('#vwb-sharp'),
       shInput:  panel.querySelector('#vwb-sharp-num'),
       compareSlider: panel.querySelector('#vwb-compare'),
@@ -821,30 +999,43 @@
       bRead:   panel.querySelector('#vwb-bread'),
       cRead:   panel.querySelector('#vwb-cread'),
       satRead: panel.querySelector('#vwb-satread'),
+      dehazeRead: panel.querySelector('#vwb-dehazeread'),
+      cleanRead: panel.querySelector('#vwb-cleanread'),
       shRead:  panel.querySelector('#vwb-sharpread'),
       enabled: panel.querySelector('#vwb-enabled'),
       all:     panel.querySelector('#vwb-all'),
       file:    panel.querySelector('#vwb-import-file'),
+      historyPanel: panel.querySelector('#vwb-history-panel'),
       resizer: panel.querySelector('#vwb-resizer')
     };
 
+    panel.querySelector('#vwb-close').textContent = 'Hide';
+    panel.querySelector('#vwb-kminus').textContent = '-10';
     panel.querySelector('#vwb-close').addEventListener('click', hidePanel);
     const nudgeKelvin = (d)=>{ state.kelvin = clamp(Math.round(state.kelvin + d), CONFIG.kelvinMin, CONFIG.kelvinMax); syncUIFromState(); saveUserAction(); refreshMatrix(); applyToVideos(false, true); };
+    const nudgeTint = (d)=>{ state.tint = clamp(Math.round(state.tint + d), -100, 100); syncUIFromState(); saveUserAction(); refreshMatrix(); applyToVideos(false, true); };
     panel.querySelector('#vwb-kminus').addEventListener('click', ()=> nudgeKelvin(-10));
     panel.querySelector('#vwb-kplus').addEventListener('click', ()=> nudgeKelvin(10));
-    pair(els.kSlider, els.kInput, v => { state.kelvin = clamp(Math.round(v), CONFIG.kelvinMin, CONFIG.kelvinMax); els.kRead.textContent = state.kelvin; saveUserAction(); refreshMatrix(); applyToVideos(false, true); });
-    pair(els.tSlider, els.tInput, v => { state.tint   = clamp(Math.round(v), -100, 100); els.tRead.textContent = state.tint; saveUserAction(); refreshMatrix(); applyToVideos(false, true); });
-    pair(els.sSlider, els.sInput, v => { state.strength = clamp(Math.round(v), 0, 100); els.sRead.textContent = `${state.strength}%`; saveUserAction(); refreshMatrix(); applyToVideos(false, true); });
-    pair(els.bSlider, els.bInput, v => { state.brightness = clamp(Math.round(v), 10, 200); els.bRead.textContent = `${state.brightness}%`; saveUserAction(); applyToVideos(false, true); });
-    pair(els.cSlider, els.cInput, v => { state.contrast = clamp(Math.round(v), 10, 250); els.cRead.textContent = `${state.contrast}%`; saveUserAction(); applyToVideos(false, true); });
-    pair(els.satSlider, els.satInput, v => { state.saturation = clamp(Math.round(v), 0, 250); els.satRead.textContent = `${state.saturation}%`; saveUserAction(); applyToVideos(false, true); });
-    pair(els.shSlider, els.shInput, v => { state.sharpness = clamp(Math.round(v), -50, 150); els.shRead.textContent = `${state.sharpness}%`; saveUserAction(); refreshSharpness(); applyToVideos(false, true); });
+    panel.querySelector('#vwb-tminus').addEventListener('click', ()=> nudgeTint(-1));
+    panel.querySelector('#vwb-tplus').addEventListener('click', ()=> nudgeTint(1));
+    pair(els.kSlider, els.kInput, v => { state.kelvin = clamp(Math.round(v), CONFIG.kelvinMin, CONFIG.kelvinMax); els.kRead.textContent = state.kelvin; saveUserAction(); refreshMatrix(); applyToVideos(false, true); }, CONFIG.default.kelvin);
+    pair(els.tSlider, els.tInput, v => { state.tint   = clamp(Math.round(v), -100, 100); els.tRead.textContent = state.tint; saveUserAction(); refreshMatrix(); applyToVideos(false, true); }, CONFIG.default.tint);
+    pair(els.sSlider, els.sInput, v => { state.strength = clamp(Math.round(v), 0, 100); els.sRead.textContent = `${state.strength}%`; saveUserAction(); refreshMatrix(); applyToVideos(false, true); }, CONFIG.default.strength);
+    pair(els.bSlider, els.bInput, v => { state.brightness = clamp(Math.round(v), 10, 200); els.bRead.textContent = `${state.brightness}%`; saveUserAction(); applyToVideos(false, true); }, CONFIG.default.brightness);
+    pair(els.cSlider, els.cInput, v => { state.contrast = clamp(Math.round(v), 10, 250); els.cRead.textContent = `${state.contrast}%`; saveUserAction(); applyToVideos(false, true); }, CONFIG.default.contrast);
+    pair(els.satSlider, els.satInput, v => { state.saturation = clamp(Math.round(v), 0, 250); els.satRead.textContent = `${state.saturation}%`; saveUserAction(); applyToVideos(false, true); }, CONFIG.default.saturation);
+    pair(els.shadowsSlider, els.shadowsInput, v => { state.shadows = clamp(Math.round(v), -100, 100); syncToneCurveUI(); saveUserAction(); refreshToneCurve(); applyToVideos(false, true); }, CONFIG.default.shadows);
+    pair(els.midtonesSlider, els.midtonesInput, v => { state.midtones = clamp(Math.round(v), -100, 100); syncToneCurveUI(); saveUserAction(); refreshToneCurve(); applyToVideos(false, true); }, CONFIG.default.midtones);
+    pair(els.highlightsSlider, els.highlightsInput, v => { state.highlights = clamp(Math.round(v), -100, 100); syncToneCurveUI(); saveUserAction(); refreshToneCurve(); applyToVideos(false, true); }, CONFIG.default.highlights);
+    pair(els.dehazeSlider, els.dehazeInput, v => { state.dehaze = clamp(Math.round(v), 0, 100); els.dehazeRead.textContent = `${state.dehaze}%`; saveUserAction(); applyToVideos(false, true); }, CONFIG.default.dehaze);
+    pair(els.cleanSlider, els.cleanInput, v => { state.compressionCleanup = clamp(Math.round(v), 0, 100); els.cleanRead.textContent = `${state.compressionCleanup}%`; saveUserAction(); applyToVideos(false, true); }, CONFIG.default.compressionCleanup);
+    pair(els.shSlider, els.shInput, v => { state.sharpness = clamp(Math.round(v), -50, 150); els.shRead.textContent = `${state.sharpness}%`; saveUserAction(); refreshSharpness(); applyToVideos(false, true); }, CONFIG.default.sharpness);
     pair(els.compareSlider, els.compareInput, v => {
       state.comparePos = normalizeComparePos(v, 0);
       els.compareRead.textContent = `${state.comparePos}%`;
       saveUserAction();
       applyToVideos(false, true);
-    });
+    }, CONFIG.default.comparePos);
     els.compareEnabled.addEventListener('change', () => {
       state.compareEnabled = els.compareEnabled.checked;
       if (state.compareEnabled) state.comparePos = COMPARE_SPLIT_POS;
@@ -868,8 +1059,8 @@
     els.all.addEventListener('change',     () => { state.applyAll = els.all.checked; saveUserAction(); applyToVideos(false, true); });
 
     panel.querySelector('#vwb-reset').addEventListener('click', () => {
-      state = { ...state, kelvin: CONFIG.default.kelvin, tint: CONFIG.default.tint, strength: CONFIG.default.strength, brightness: CONFIG.default.brightness, contrast: CONFIG.default.contrast, saturation: CONFIG.default.saturation, sharpness: CONFIG.default.sharpness };
-      syncUIFromState(); saveUserAction(); refreshMatrix(); refreshSharpness(); applyToVideos(true, true);
+      state = { ...state, kelvin: CONFIG.default.kelvin, tint: CONFIG.default.tint, strength: CONFIG.default.strength, brightness: CONFIG.default.brightness, contrast: CONFIG.default.contrast, saturation: CONFIG.default.saturation, shadows: CONFIG.default.shadows, midtones: CONFIG.default.midtones, highlights: CONFIG.default.highlights, dehaze: CONFIG.default.dehaze, compressionCleanup: CONFIG.default.compressionCleanup, sharpness: CONFIG.default.sharpness };
+      syncUIFromState(); saveUserAction(); refreshMatrix(); refreshToneCurve(); refreshSharpness(); applyToVideos(true, true);
     });
 
     panel.querySelector('#vwb-rescan').addEventListener('click', () => { saveUserAction(); applyToVideos(true, true); updateBubbleVisibility(); autoApplySnapshotIfPresent(true); });
@@ -884,6 +1075,10 @@
     els.siteInput.addEventListener('input', updateSitePresetState);
     panel.querySelector('#vwb-export').addEventListener('click', exportSnapshots);
     panel.querySelector('#vwb-import').addEventListener('click', () => els.file.click());
+    panel.querySelector('#vwb-history').addEventListener('click', () => {
+      els.historyPanel.classList.toggle('open');
+      renderHistoryPanel();
+    });
     els.file.addEventListener('change', (e) => {
       const f = e.target.files?.[0];
       if (f) importSnapshotsFromFile(f);
@@ -920,21 +1115,43 @@
     }
 
     if (state.visible) clampPanelIntoViewport();
+    makeDraggable(panel, panel.querySelector('#vwb-header'), (x, y) => {
+      state.x = x;
+      state.y = y;
+      save();
+    });
+    syncToneCurveUI();
     updateRestoreState();
     return panel;
   }
 
   // ---------- Draggable bubble ----------
+  function setBubbleDragShield(active, onMove, onUp) {
+    if (!sr) return;
+    if (!active) {
+      if (bubbleDragShield) bubbleDragShield.remove();
+      bubbleDragShield = null;
+      return;
+    }
+    if (bubbleDragShield) bubbleDragShield.remove();
+    bubbleDragShield = document.createElement('div');
+    bubbleDragShield.id = 'vwb-bubble-drag-shield';
+    bubbleDragShield.addEventListener('mousemove', onMove);
+    bubbleDragShield.addEventListener('mouseup', onUp);
+    sr.appendChild(bubbleDragShield);
+  }
+
   function makeDraggableBubble(el) {
     clampBubbleIntoViewport();
     let dragging = false, moved = false, sx = 0, sy = 0, bx = 0, by = 0;
     const thresh = 3;
 
     const onDown = (e) => {
-      dragging = true; moved = false;
+      dragging = true; bubbleDragging = true; moved = false;
       sx = e.clientX; sy = e.clientY;
       const r = el.getBoundingClientRect(); bx = r.left; by = r.top;
       el.classList.add('dragging');
+      setBubbleDragShield(true, onMove, onUp);
       e.preventDefault();
     };
     const onMove = (e) => {
@@ -949,8 +1166,10 @@
     };
     const onUp = () => {
       if (!dragging) return;
-      dragging = false; el.classList.remove('dragging');
+      dragging = false; bubbleDragging = false; el.classList.remove('dragging');
+      setBubbleDragShield(false);
       if (moved) {
+        bubbleManualPageKey = location.href;
         state.bubbleX = Math.round(parseFloat(el.style.left)) || 12;
         state.bubbleY = Math.round(parseFloat(el.style.top))  || 12;
         linkPanelToBubble(isPanelVisible());
@@ -981,17 +1200,42 @@
   // ---------- Bubble visibility ----------
   function hasAnyVideo() {
     if (hasAnyVideoLocal()) return true;
-    if (!IS_TOP) return false;
-    const now = Date.now();
-    let seen = false;
-    for (const [id, entry] of framePresence.entries()) {
-      if (!entry) continue;
-      if (now - entry.at > FRAME_STATUS_TTL_MS) { framePresence.delete(id); continue; }
-      if (entry.hasVideo) seen = true;
-    }
-    return seen;
+    return hasFreshFrameVideo();
   }
-  function updateBubbleVisibility() { if (bubble) bubble.style.display = (hasAnyVideo() || shouldForceBubbleVisible()) ? 'flex' : 'none'; }
+  function updateBubbleVisibility() { if (bubble) bubble.style.display = IS_TOP ? 'flex' : 'none'; }
+
+  function updateTargetBadge(mode = 'direct video') {
+    const badge = bubble?.querySelector?.('#vwb-target-badge');
+    if (badge) badge.textContent = mode;
+  }
+
+  function targetModeFor(videos) {
+    const primary = pickPrimary(videos);
+    return primary?.tagName === 'IFRAME' ? 'iframe target' : 'direct video';
+  }
+
+  function positionBubbleNearTarget(videos) {
+    if (!IS_TOP || !bubble || bubbleDragging || !videos?.length) return;
+    const target = pickPrimary(videos);
+    if (!target || !isTargetVisibleCandidate(target)) return;
+    const rect = target.getBoundingClientRect();
+    const bw = bubble.offsetWidth || 32;
+    const bh = bubble.offsetHeight || 32;
+    const pageKey = location.href;
+    const area = Math.round(rect.width * rect.height);
+    if (bubbleManualPageKey === pageKey) return;
+    if (lastBubbleAnchorKey === pageKey && area <= lastBubbleAnchorArea * 1.2) return;
+    const x = clamp(Math.round(rect.left + 8), 0, Math.max(0, (innerWidth || 1280) - bw));
+    const y = clamp(Math.round(rect.top + 8), 0, Math.max(0, (innerHeight || 720) - bh));
+    lastBubbleAnchorKey = pageKey;
+    lastBubbleAnchorArea = area;
+    state.bubbleX = x;
+    state.bubbleY = y;
+    bubble.style.left = `${x}px`;
+    bubble.style.top = `${y}px`;
+    if (isPanelVisible()) linkPanelToBubble(true);
+    save();
+  }
 
   function linkPanelToBubble(applyToPanel = true) {
     if (!IS_TOP || !bubble) return;
@@ -1084,6 +1328,116 @@
       .replace(/>/g, '&gt;');
   }
 
+  function refreshHistoryIfOpen() {
+    if (els.historyPanel?.classList.contains('open')) renderHistoryPanel();
+  }
+
+  function renderHistoryPanel() {
+    const box = els.historyPanel;
+    if (!box) return;
+    const query = box.querySelector?.('#vwb-history-search')?.value?.trim().toLowerCase() || '';
+    const rows = [];
+    for (const [key, snap] of Object.entries(state.snapshots || {})) {
+      rows.push({ type: 'Video', key, snap, at: Date.parse(snap?.updatedAt || '') || 0 });
+    }
+    for (const [key, snap] of Object.entries(state.sitePresets || {})) {
+      rows.push({ type: 'Site', key, snap, at: Date.parse(snap?.updatedAt || '') || 0 });
+    }
+    rows.sort((a, b) => b.at - a.at || a.type.localeCompare(b.type) || a.key.localeCompare(b.key));
+    const visibleRows = query
+      ? rows.filter((item) => `${item.type} ${item.key} ${formatSnapshotSummary(item.snap)}`.toLowerCase().includes(query))
+      : rows;
+    box.replaceChildren();
+
+    const head = document.createElement('div');
+    head.className = 'vwb-history-head';
+    const title = document.createElement('span');
+    title.className = 'vwb-history-title';
+    title.textContent = 'Saved Settings';
+    const count = document.createElement('span');
+    count.className = 'vwb-small';
+    count.textContent = query ? `${visibleRows.length}/${rows.length}` : `${rows.length} total`;
+    head.append(title, count);
+    box.appendChild(head);
+
+    if (!rows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'vwb-small';
+      empty.textContent = 'No video or site settings saved yet.';
+      box.appendChild(empty);
+      return;
+    }
+
+    const search = document.createElement('input');
+    search.id = 'vwb-history-search';
+    search.type = 'search';
+    search.placeholder = 'Search saved URLs and settings';
+    search.value = query;
+    search.addEventListener('input', renderHistoryPanel);
+    box.appendChild(search);
+
+    if (!visibleRows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'vwb-small';
+      empty.textContent = 'No saved settings match that search.';
+      box.appendChild(empty);
+      return;
+    }
+
+    const list = document.createElement('div');
+    list.className = 'vwb-history-list';
+    for (const item of visibleRows) {
+      const row = document.createElement('div');
+      row.className = 'vwb-history-row';
+
+      const meta = document.createElement('div');
+      meta.className = 'vwb-history-meta';
+      meta.textContent = `${item.type}: ${item.key}`;
+
+      const when = document.createElement('div');
+      when.className = 'vwb-small';
+      when.textContent = item.at ? `Updated ${formatDateShort(new Date(item.at))}` : 'Updated date unknown';
+
+      const settings = document.createElement('div');
+      settings.className = 'vwb-history-settings';
+      settings.textContent = formatSnapshotSummary(item.snap);
+
+      const actions = document.createElement('div');
+      actions.className = 'vwb-history-actions';
+      const applyBtn = document.createElement('button');
+      applyBtn.className = 'vwb-btn';
+      applyBtn.type = 'button';
+      applyBtn.textContent = 'Apply';
+      applyBtn.addEventListener('click', () => {
+        applySnapshotSettings(item.snap, true);
+        markUserAction();
+        save();
+        updateRestoreState();
+        renderHistoryPanel();
+      });
+      actions.appendChild(applyBtn);
+
+      row.append(meta, when, settings, actions);
+      list.appendChild(row);
+    }
+    box.appendChild(list);
+  }
+
+  function formatSnapshotSummary(snap) {
+    const s = normalizeSnapshot(snap) || snap || CONFIG.default;
+    return [
+      `K ${s.kelvin}`,
+      `Tint ${s.tint}`,
+      `Strength ${s.strength}%`,
+      `B/C/S ${s.brightness}/${s.contrast}/${s.saturation}`,
+      `Tone S/M/H ${s.shadows}/${s.midtones}/${s.highlights}`,
+      `Dehaze ${s.dehaze}`,
+      `Clean ${s.compressionCleanup}`,
+      `Sharp ${s.sharpness}`,
+      `Compare ${s.compareEnabled ? s.comparePos + '%' : 'off'}`
+    ].join(' | ');
+  }
+
   function snapshotFromState() {
     return {
       kelvin: state.kelvin,
@@ -1092,6 +1446,11 @@
       brightness: state.brightness,
       contrast: state.contrast,
       saturation: state.saturation,
+      shadows: state.shadows,
+      midtones: state.midtones,
+      highlights: state.highlights,
+      dehaze: state.dehaze,
+      compressionCleanup: state.compressionCleanup,
       sharpness: state.sharpness,
       compareEnabled: !!state.compareEnabled,
       comparePos: normalizeComparePos(state.comparePos, CONFIG.default.comparePos),
@@ -1107,11 +1466,17 @@
     state.brightness = snap.brightness ?? CONFIG.default.brightness;
     state.contrast = snap.contrast ?? CONFIG.default.contrast;
     state.saturation = snap.saturation ?? CONFIG.default.saturation;
+    state.shadows = snap.shadows ?? CONFIG.default.shadows;
+    state.midtones = snap.midtones ?? CONFIG.default.midtones;
+    state.highlights = snap.highlights ?? CONFIG.default.highlights;
+    state.dehaze = snap.dehaze ?? CONFIG.default.dehaze;
+    state.compressionCleanup = snap.compressionCleanup ?? CONFIG.default.compressionCleanup;
     state.sharpness = snap.sharpness ?? CONFIG.default.sharpness;
     state.compareEnabled = snap.compareEnabled ?? state.compareEnabled;
     state.comparePos = normalizeComparePos(snap.comparePos, state.comparePos ?? CONFIG.default.comparePos);
     syncUIFromState();
     refreshMatrix();
+    refreshToneCurve();
     refreshSharpness();
     applyToVideos(true, userAction);
     return true;
@@ -1126,6 +1491,11 @@
       brightness: clamp(Math.round(snap.brightness ?? CONFIG.default.brightness), 10, 200),
       contrast: clamp(Math.round(snap.contrast ?? CONFIG.default.contrast), 10, 250),
       saturation: clamp(Math.round(snap.saturation ?? CONFIG.default.saturation), 0, 250),
+      shadows: clamp(Math.round(snap.shadows ?? CONFIG.default.shadows), -100, 100),
+      midtones: clamp(Math.round(snap.midtones ?? CONFIG.default.midtones), -100, 100),
+      highlights: clamp(Math.round(snap.highlights ?? CONFIG.default.highlights), -100, 100),
+      dehaze: clamp(Math.round(snap.dehaze ?? CONFIG.default.dehaze), 0, 100),
+      compressionCleanup: clamp(Math.round(snap.compressionCleanup ?? CONFIG.default.compressionCleanup), 0, 100),
       sharpness: clamp(Math.round(snap.sharpness ?? CONFIG.default.sharpness), -50, 150),
       compareEnabled: typeof snap.compareEnabled === 'boolean' ? snap.compareEnabled : undefined,
       comparePos: Number.isFinite(Number(snap.comparePos)) ? normalizeComparePos(snap.comparePos, CONFIG.default.comparePos) : undefined,
@@ -1172,6 +1542,7 @@
     saveCurrentVideoSnapshot({ flash: true });
     save();
     updateRestoreState();
+    refreshHistoryIfOpen();
   }
 
   function onSaveDefaultPreset() {
@@ -1182,6 +1553,11 @@
       brightness: state.brightness,
       contrast: state.contrast,
       saturation: state.saturation,
+      shadows: state.shadows,
+      midtones: state.midtones,
+      highlights: state.highlights,
+      dehaze: state.dehaze,
+      compressionCleanup: state.compressionCleanup,
       sharpness: state.sharpness
     });
     save();
@@ -1207,6 +1583,7 @@
     markUserAction();
     save();
     updateSitePresetState();
+    refreshHistoryIfOpen();
     flashBubble('S');
   }
 
@@ -1226,6 +1603,7 @@
     delete state.sitePresets[key];
     save();
     updateSitePresetState();
+    refreshHistoryIfOpen();
     flashBubble('X');
   }
 
@@ -1304,6 +1682,11 @@
     els.bSlider.value = els.bInput.value = state.brightness;
     els.cSlider.value = els.cInput.value = state.contrast;
     els.satSlider.value = els.satInput.value = state.saturation;
+    els.shadowsSlider.value = els.shadowsInput.value = state.shadows;
+    els.midtonesSlider.value = els.midtonesInput.value = state.midtones;
+    els.highlightsSlider.value = els.highlightsInput.value = state.highlights;
+    els.dehazeSlider.value = els.dehazeInput.value = state.dehaze;
+    els.cleanSlider.value = els.cleanInput.value = state.compressionCleanup;
     els.shSlider.value = els.shInput.value = state.sharpness;
     if (els.compareSlider) els.compareSlider.value = els.compareInput.value = state.comparePos;
     els.kRead.textContent = state.kelvin;
@@ -1312,6 +1695,9 @@
     els.bRead.textContent = `${state.brightness}%`;
     els.cRead.textContent = `${state.contrast}%`;
     els.satRead.textContent = `${state.saturation}%`;
+    syncToneCurveUI();
+    els.dehazeRead.textContent = `${state.dehaze}%`;
+    els.cleanRead.textContent = `${state.compressionCleanup}%`;
     els.shRead.textContent = `${state.sharpness}%`;
     if (els.compareRead) els.compareRead.textContent = `${state.comparePos}%`;
     if (els.compareEnabled) els.compareEnabled.checked = !!state.compareEnabled;
@@ -1401,6 +1787,7 @@
           applySnapshotSettings(state.snapshots[key], true);
         }
         updateSitePresetState();
+        refreshHistoryIfOpen();
       } catch {
         alert('Could not read settings file.');
       }
@@ -1433,18 +1820,25 @@
     state.brightness = def.brightness ?? CONFIG.default.brightness;
     state.contrast = def.contrast ?? CONFIG.default.contrast;
     state.saturation = def.saturation ?? CONFIG.default.saturation;
+    state.shadows = def.shadows ?? CONFIG.default.shadows;
+    state.midtones = def.midtones ?? CONFIG.default.midtones;
+    state.highlights = def.highlights ?? CONFIG.default.highlights;
+    state.dehaze = def.dehaze ?? CONFIG.default.dehaze;
+    state.compressionCleanup = def.compressionCleanup ?? CONFIG.default.compressionCleanup;
     state.sharpness = def.sharpness ?? CONFIG.default.sharpness;
     state.compareEnabled = CONFIG.default.compareEnabled;
     state.comparePos = CONFIG.default.comparePos;
-    syncUIFromState(); refreshMatrix(); refreshSharpness(); applyToVideos(true, userAction);
+    syncUIFromState(); refreshMatrix(); refreshToneCurve(); refreshSharpness(); applyToVideos(true, userAction);
     autoAppliedKeys.add(key);
   }
 
   function flashBubble(icon='✓') {
     if (!bubble) return;
-    const old = bubble.textContent;
-    bubble.textContent = icon;
-    setTimeout(() => { bubble.textContent = old; }, 600);
+    const label = bubble.querySelector?.('#vwb-bubble-main');
+    if (!label) return;
+    const old = label.textContent;
+    label.textContent = icon;
+    setTimeout(() => { label.textContent = old; }, 600);
   }
 
   // ---------- Panel visibility ----------
@@ -1494,13 +1888,22 @@
     save();
   }
 
-  function pair(slider, input, on) {
-    slider.addEventListener('input', () => { input.value = slider.value; on(+slider.value); });
-    input.addEventListener('change', () => {
-      const v = clamp(+input.value, +slider.min, +slider.max);
+  function pair(slider, input, on, resetValue = undefined) {
+    const commit = (value) => {
+      const v = clamp(+value, +slider.min, +slider.max);
       input.value = slider.value = String(v);
       on(v);
+    };
+    slider.addEventListener('input', () => { input.value = slider.value; on(+slider.value); });
+    input.addEventListener('change', () => {
+      commit(input.value);
     });
+    const reset = () => {
+      if (resetValue === undefined) return;
+      commit(resetValue);
+    };
+    slider.addEventListener('dblclick', reset);
+    input.addEventListener('dblclick', reset);
   }
 
   // ---------- Kelvin + Tint math (extended) ----------
@@ -1513,6 +1916,57 @@
     if (matrixNode) matrixNode.setAttribute('values', values);
     if (matrixNodeLite) matrixNodeLite.setAttribute('values', values);
   }
+
+  function buildToneCurveValues(shadows, midtones, highlights, steps = 17) {
+    const s = clamp(Number(shadows) || 0, -100, 100) / 100;
+    const m = clamp(Number(midtones) || 0, -100, 100) / 100;
+    const h = clamp(Number(highlights) || 0, -100, 100) / 100;
+    const out = [];
+    let prev = 0;
+    for (let i = 0; i < steps; i += 1) {
+      const x = steps <= 1 ? 0 : i / (steps - 1);
+      const shadowWeight = (1 - x) * (1 - x);
+      const midWeight = 4 * x * (1 - x);
+      const highlightWeight = x * x;
+      let y = x + (s * 0.28 * shadowWeight) + (m * 0.22 * midWeight) + (h * 0.28 * highlightWeight);
+      y = clamp(y, 0, 1);
+      if (i > 0) y = Math.max(prev, y);
+      prev = y;
+      out.push(Number(y.toFixed(4)));
+    }
+    return out;
+  }
+
+  function refreshToneCurve() {
+    ensureSVG();
+    const tableValues = buildToneCurveValues(state.shadows, state.midtones, state.highlights).join(' ');
+    for (const tone of [toneNode, toneNodeLite]) {
+      if (!tone) continue;
+      tone.querySelectorAll('feFuncR, feFuncG, feFuncB').forEach((fn) => {
+        fn.setAttribute('type', 'table');
+        fn.setAttribute('tableValues', tableValues);
+      });
+    }
+    renderToneCurvePreview();
+  }
+
+  function syncToneCurveUI() {
+    if (!panel || !els.toneRead) return;
+    els.toneRead.textContent = `S ${state.shadows} / M ${state.midtones} / H ${state.highlights}`;
+    renderToneCurvePreview();
+  }
+
+  function renderToneCurvePreview() {
+    if (!els.toneCurveLine) return;
+    const values = buildToneCurveValues(state.shadows, state.midtones, state.highlights);
+    const points = values.map((v, i) => {
+      const x = values.length <= 1 ? 0 : (i / (values.length - 1)) * 128;
+      const y = 64 - (v * 64);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    els.toneCurveLine.setAttribute('points', points);
+  }
+
   function refreshSharpness(){
     ensureSVG();
     if (!sharpNode) return;
@@ -1555,10 +2009,26 @@
   function currentFilterString(filterId){
     const parts = [];
     const id = filterId || 'vwb-filter';
+    const dehaze = clamp(state.dehaze ?? 0, 0, 100);
+    const compressionCleanup = clamp(state.compressionCleanup ?? 0, 0, 100);
     parts.push(`url(#${id})`);
     parts.push(`brightness(${state.brightness}%)`);
     parts.push(`contrast(${state.contrast}%)`);
     parts.push(`saturate(${state.saturation}%)`);
+    if (dehaze > 0) {
+      parts.push(`contrast(${100 + Math.round(dehaze * 0.6)}%)`);
+      parts.push(`saturate(${100 + Math.round(dehaze * 0.25)}%)`);
+      parts.push(`brightness(${100 - Math.round(dehaze * 0.08)}%)`);
+    }
+    if (compressionCleanup > 0) {
+      const clean = compressionCleanup / 100;
+      const blur = (0.05 + (0.19 * clean * clean)).toFixed(2);
+      const contrast = clamp(Math.round(100 - (6 * clean)), 94, 100);
+      const saturation = clamp(Math.round(100 + (8 * clean)), 100, 108);
+      parts.push(`blur(${blur}px)`);
+      parts.push(`contrast(${contrast}%)`);
+      parts.push(`saturate(${saturation}%)`);
+    }
     return parts.join(' ');
   }
 
@@ -1969,9 +2439,11 @@
 
   async function pickWBWithZoom() {
     if (!IS_TOP) return false;
+    applyToVideos(true, true);
+    await new Promise(resolve => requestAnimationFrame(resolve));
     const videos = scanVideos(true).filter(v => v.tagName === 'VIDEO');
     const video = pickPrimary(videos);
-    if (!video || !isTargetVisibleCandidate(video) || video.readyState < 2) return false;
+    if (!video || !isTargetVisibleCandidate(video)) return false;
     return await runVideoPicker(video);
   }
 
@@ -2213,11 +2685,16 @@
     if (allowFilter || allowCompare) {
       ensureSVG();
       refreshMatrix();
+      refreshToneCurve();
       refreshSharpness();
     }
     const vids = scanVideos(forceScan);
     if (!IS_TOP) notifyTopFrame(vids.length > 0);
     if(!vids.length) { lastPrimaryVideo = null; teardownCompareOverlay(); updateBubbleVisibility(); return; }
+    if (IS_TOP) {
+      positionBubbleNearTarget(vids);
+      updateTargetBadge(targetModeFor(vids));
+    }
 
     let compareTarget = null;
     let compareActive = false;
@@ -2446,12 +2923,12 @@
     const _rs=history.replaceState; history.replaceState=function(){ const r=_rs.apply(this,arguments); fire(); return r; };
     window.addEventListener('popstate', fire);
     window.addEventListener('hashchange', fire);
-    window.addEventListener('vwb-locationchange', ()=>{ setTimeout(()=>{ ensureHost(); buildBubble(); buildPanel(); ensureSVG(); refreshMatrix(); applyToVideos(true, false); updateRestoreState(); updateBubbleVisibility(); rescanBurst(); }, 50); });
+    window.addEventListener('vwb-locationchange', ()=>{ setTimeout(()=>{ ensureHost(); buildBubble(); buildPanel(); ensureSVG(); refreshMatrix(); refreshToneCurve(); applyToVideos(true, false); updateRestoreState(); updateBubbleVisibility(); rescanBurst(); }, 50); });
   })();
 
   window.addEventListener('yt-navigate-finish', () => setTimeout(rearm, 50), true);
   window.addEventListener('yt-page-data-updated', () => setTimeout(rearm, 50), true);
-  function rearm(){ ensureHost(); buildBubble(); buildPanel(); ensureSVG(); refreshMatrix(); applyToVideos(true, false); updateRestoreState(); updateBubbleVisibility(); rescanBurst(); }
+  function rearm(){ ensureHost(); buildBubble(); buildPanel(); ensureSVG(); refreshMatrix(); refreshToneCurve(); applyToVideos(true, false); updateRestoreState(); updateBubbleVisibility(); rescanBurst(); }
 
   // ---------- Hotkeys & menu ----------
   function onKey(e){
@@ -2530,6 +3007,7 @@
     fullscreenActive = isFullscreenActive();
     ensureSVG();
     refreshMatrix();
+    refreshToneCurve();
     if(state.enabled){ startObserver(); applyToVideos(true, false); autoApplySnapshotIfPresent(false); }
     else { clearFilters(); }
     startWatchdog();

@@ -1,8 +1,8 @@
 # WBForVideos
 
-WBForVideos is a Violentmonkey/Tampermonkey userscript for adjusting HTML5 video appearance directly in the browser.
+WBForVideos is a Violentmonkey/Tampermonkey userscript for tuning HTML5 video color directly in the browser.
 
-It adds a small floating `WB` bubble on pages with video. Open the panel to tune white balance, tint, brightness, contrast, saturation, sharpness, compare split, and per-site presets.
+It adds a draggable `WB` launcher on pages with video. Open the panel to tune white balance, tint, brightness, contrast, saturation, sharpness, highlights, midtones, shadows, and a tone curve.
 
 ![WBForVideos example panel](assets/example-screenshot.png)
 
@@ -11,12 +11,15 @@ It adds a small floating `WB` bubble on pages with video. Open the panel to tune
 - Kelvin white balance from `500 K` to `100,000 K`.
 - Tint and strength controls.
 - Brightness, contrast, saturation, and sharpness controls.
+- Highlights, midtones, shadows, and a tone curve for finer grading.
 - White-balance picker for choosing a neutral point from the video.
+- Searchable history for saved video and site settings.
 - Compare split for checking adjusted vs original video.
 - Per-video saves.
 - Per-website presets, such as one preset for YouTube and another for another video site.
 - JSON import/export for moving presets between browsers.
-- Fullscreen stability handling for difficult embedded players, including Animepahe.
+- Draggable launcher with a direct video / iframe target badge.
+- Fullscreen stability handling for difficult embedded players, including Animepahe and Fulltaboo-style nested frames.
 - Small `Built by Amir` footer with `followamir.com` and Donate links.
 
 ## Install

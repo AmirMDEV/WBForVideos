@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.39 - 2026-06-24
+
+- Added a searchable history panel for saved video and site settings.
+
+## 3.38 - 2026-06-24
+
+- Moved the `direct video` / `iframe target` tag inside the draggable launcher pill.
+
+## 3.37 - 2026-06-24
+
+- Added a transparent drag shield so cross-origin iframes cannot steal mousemove events while moving the launcher.
+
 ## 3.28 - 2026-05-01
 
 - Added the `Built by Amir` footer with `followamir.com` and Donate links.

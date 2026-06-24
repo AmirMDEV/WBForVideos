@@ -4,6 +4,8 @@ WBForVideos is a Violentmonkey/Tampermonkey userscript for tuning HTML5 video co
 
 It adds a draggable `WB` launcher on pages with video. Open the panel to tune white balance, tint, brightness, contrast, saturation, sharpness, highlights, midtones, shadows, and a tone curve.
 
+[Install WBForVideos](https://github.com/AmirMDEV/WBForVideos/raw/main/WBForVideos.user.js)
+
 ![WBForVideos example panel](assets/example-screenshot.png)
 
 ## Features

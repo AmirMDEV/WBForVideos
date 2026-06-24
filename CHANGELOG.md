@@ -2,6 +2,7 @@
 
 ## 3.39 - 2026-06-24
 
+- Added a one-click install link on the repository homepage README.
 - Added a searchable history panel for saved video and site settings.
 
 ## 3.38 - 2026-06-24
